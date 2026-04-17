@@ -39,13 +39,13 @@ tests/load/              Locust load scenarios
 
 **Purpose**: Repo scaffolding, package initialization, local dev environment, CI skeleton.
 
-- [ ] T001 Create full project directory structure per plan.md (services/api/, services/worker/, shared/, infra/docker/, infra/k8s/, tests/unit/, tests/contract/, tests/integration/, tests/load/, .github/workflows/)
-- [ ] T002 [P] Initialize shared/ as installable Python package in shared/pyproject.toml (Python 3.11+, SQLAlchemy 2, Pydantic v2, asyncpg, structlog, opentelemetry-sdk, faiss-cpu, sentence-transformers, openai, anthropic, redis, celery)
-- [ ] T003 [P] Initialize services/api/ package in services/api/pyproject.toml (FastAPI 0.111+, python-jose[cryptography], slowapi, prometheus-fastapi-instrumentator, httpx; depends on shared/)
-- [ ] T004 [P] Initialize services/worker/ package in services/worker/pyproject.toml (Celery[redis], pdfplumber, python-docx; depends on shared/)
-- [ ] T005 [P] Create infra/docker/docker-compose.yml (services: api, worker, postgres:15-alpine, redis:7-alpine, jaeger:latest, mock-idp; health checks, named volumes, .env file reference)
-- [ ] T006 [P] Create infra/docker/.env.example (all env vars: DATABASE_URL, REDIS_URL, CELERY_BROKER_URL, FAISS_DATA_PATH, LLM_PROVIDER, OPENAI_API_KEY, ANTHROPIC_API_KEY, AUTH_JWKS_URL, AUTH_TOKEN_ISSUER, CHUNK_SIZE, CHUNK_OVERLAP, CACHE_TTL_SECONDS, QUERY_RATE_LIMIT_PER_MINUTE, UPLOAD_RATE_LIMIT_PER_MINUTE, MAX_FILE_SIZE_BYTES, LOG_LEVEL, OTEL_EXPORTER_OTLP_ENDPOINT)
-- [ ] T007 [P] Create .github/workflows/ci.yml skeleton (jobs: lint with ruff, type-check with mypy --strict, unit-test with pytest tests/unit/, build docker images for api and worker)
+- [X] T001 Create full project directory structure per plan.md (services/api/, services/worker/, shared/, infra/docker/, infra/k8s/, tests/unit/, tests/contract/, tests/integration/, tests/load/, .github/workflows/)
+- [X] T002 [P] Initialize shared/ as installable Python package in shared/pyproject.toml (Python 3.11+, SQLAlchemy 2, Pydantic v2, asyncpg, structlog, opentelemetry-sdk, faiss-cpu, sentence-transformers, openai, anthropic, redis, celery)
+- [X] T003 [P] Initialize services/api/ package in services/api/pyproject.toml (FastAPI 0.111+, python-jose[cryptography], slowapi, prometheus-fastapi-instrumentator, httpx; depends on shared/)
+- [X] T004 [P] Initialize services/worker/ package in services/worker/pyproject.toml (Celery[redis], pdfplumber, python-docx; depends on shared/)
+- [X] T005 [P] Create infra/docker/docker-compose.yml (services: api, worker, postgres:15-alpine, redis:7-alpine, jaeger:latest, mock-idp; health checks, named volumes, .env file reference)
+- [X] T006 [P] Create infra/docker/.env.example (all env vars: DATABASE_URL, REDIS_URL, CELERY_BROKER_URL, FAISS_DATA_PATH, LLM_PROVIDER, OPENAI_API_KEY, ANTHROPIC_API_KEY, AUTH_JWKS_URL, AUTH_TOKEN_ISSUER, CHUNK_SIZE, CHUNK_OVERLAP, CACHE_TTL_SECONDS, QUERY_RATE_LIMIT_PER_MINUTE, UPLOAD_RATE_LIMIT_PER_MINUTE, MAX_FILE_SIZE_BYTES, LOG_LEVEL, OTEL_EXPORTER_OTLP_ENDPOINT)
+- [X] T007 [P] Create .github/workflows/ci.yml skeleton (jobs: lint with ruff, type-check with mypy --strict, unit-test with pytest tests/unit/, build docker images for api and worker)
 
 **Checkpoint**: All packages install cleanly; `docker compose config` validates without errors.
 
@@ -58,22 +58,22 @@ All user story work depends on this phase being complete.
 
 **⚠️ CRITICAL**: No user story implementation begins until this phase is complete.
 
-- [ ] T008 Create shared/src/config/settings.py (Pydantic BaseSettings: all env vars from T006 with types, defaults, and validators; export Settings singleton via `get_settings()`)
-- [ ] T009 [P] Create shared/src/db/session.py (create_async_engine from DATABASE_URL, AsyncSessionLocal factory, get_db() async generator dependency)
-- [ ] T010 [P] Configure Alembic in shared/src/db/ (alembic.ini targeting DATABASE_URL, env.py with async engine, versions/ directory; run `alembic init` equivalent)
-- [ ] T011 Create shared/src/models/user.py (User SQLAlchemy 2 mapped class: id UUID PK, external_id UNIQUE, email, role, query_rate_limit_per_minute, storage_quota_bytes, used_storage_bytes, tenant_id, created_at, updated_at; index on external_id)
-- [ ] T012 [P] Create shared/src/models/document.py (Document model: id, owner_id FK→users, tenant_id, original_filename, content_type, content_hash CHAR(64), size_bytes, processing_status, error_message, created_at, updated_at; UniqueConstraint(owner_id, content_hash); index on owner_id)
-- [ ] T013 [P] Create shared/src/models/chunk.py (Chunk model: id, document_id FK, owner_id FK, tenant_id, chunk_index, page_number nullable, row_range nullable, text_content, token_count, created_at; indexes on document_id, owner_id)
-- [ ] T014 [P] Create shared/src/models/ingestion_job.py (IngestionJob model: id, document_id FK, owner_id FK, status, error_message, celery_task_id, created_at, updated_at, completed_at; indexes on owner_id, celery_task_id)
-- [ ] T015 [P] Create shared/src/models/query_log.py (QueryLog model: id, user_id FK, tenant_id, query_hash, response_latency_ms, cache_hit, degraded, top_k_requested, chunks_retrieved, created_at; index on user_id + created_at)
-- [ ] T016 Create Alembic initial migration in shared/src/db/migrations/versions/0001_initial_schema.py (creates all 5 tables from T011–T015; reversible downgrade)
-- [ ] T017 Create shared/src/providers/vector_store.py (VectorStoreProvider ABC: abstract methods add_chunks(chunks, embeddings, owner_id), search(query_vector, k, owner_id) -> list[ChunkResult], delete_by_document(document_id, owner_id); ChunkResult dataclass: chunk_id, score)
-- [ ] T018 [P] Create shared/src/providers/embedding.py (EmbeddingProvider ABC: abstract methods embed_texts(texts: list[str]) -> list[list[float]], embed_query(text: str) -> list[float])
-- [ ] T019 [P] Create shared/src/providers/llm.py (LLMProvider ABC: abstract method generate(system_prompt, context_chunks, user_query) -> str; ProviderUnavailableError exception class)
-- [ ] T020 Create services/api/src/main.py (FastAPI app factory with title="RAG API", version from env; lifespan context manager: init DB connection pool on startup, close on shutdown; include health router; OpenAPI at /docs)
-- [ ] T021 [P] Create services/api/src/schemas/health.py (HealthResponse, ServiceChecks, ReadinessResponse Pydantic v2 models matching contracts/health.md)
-- [ ] T022 Create services/api/src/routers/health.py (GET /api/v1/health: return HealthResponse{status:"healthy"}; GET /api/v1/ready: ping DB + Redis, return ReadinessResponse with check statuses, 503 if any critical check fails)
-- [ ] T023 Write contract tests tests/contract/test_health.py (test GET /health returns 200 + HealthResponse schema; GET /ready returns 200/503 + ReadinessResponse schema; no auth required on either endpoint) — **FAIL before T022**
+- [X] T008 Create shared/src/config/settings.py (Pydantic BaseSettings: all env vars from T006 with types, defaults, and validators; export Settings singleton via `get_settings()`)
+- [X] T009 [P] Create shared/src/db/session.py (create_async_engine from DATABASE_URL, AsyncSessionLocal factory, get_db() async generator dependency)
+- [X] T010 [P] Configure Alembic in shared/src/db/ (alembic.ini targeting DATABASE_URL, env.py with async engine, versions/ directory; run `alembic init` equivalent)
+- [X] T011 Create shared/src/models/user.py (User SQLAlchemy 2 mapped class: id UUID PK, external_id UNIQUE, email, role, query_rate_limit_per_minute, storage_quota_bytes, used_storage_bytes, tenant_id, created_at, updated_at; index on external_id)
+- [X] T012 [P] Create shared/src/models/document.py (Document model: id, owner_id FK→users, tenant_id, original_filename, content_type, content_hash CHAR(64), size_bytes, processing_status, error_message, created_at, updated_at; UniqueConstraint(owner_id, content_hash); index on owner_id)
+- [X] T013 [P] Create shared/src/models/chunk.py (Chunk model: id, document_id FK, owner_id FK, tenant_id, chunk_index, page_number nullable, row_range nullable, text_content, token_count, created_at; indexes on document_id, owner_id)
+- [X] T014 [P] Create shared/src/models/ingestion_job.py (IngestionJob model: id, document_id FK, owner_id FK, status, error_message, celery_task_id, created_at, updated_at, completed_at; indexes on owner_id, celery_task_id)
+- [X] T015 [P] Create shared/src/models/query_log.py (QueryLog model: id, user_id FK, tenant_id, query_hash, response_latency_ms, cache_hit, degraded, top_k_requested, chunks_retrieved, created_at; index on user_id + created_at)
+- [X] T016 Create Alembic initial migration in shared/alembic/versions/0001_initial_schema.py (creates all 5 tables from T011–T015; reversible downgrade)
+- [X] T017 Create shared/src/providers/vector_store.py (VectorStoreProvider ABC: abstract methods add_chunks(chunks, embeddings, owner_id), search(query_vector, k, owner_id) -> list[ChunkResult], delete_by_document(document_id, owner_id); ChunkResult dataclass: chunk_id, score)
+- [X] T018 [P] Create shared/src/providers/embedding.py (EmbeddingProvider ABC: abstract methods embed_texts(texts: list[str]) -> list[list[float]], embed_query(text: str) -> list[float])
+- [X] T019 [P] Create shared/src/providers/llm.py (LLMProvider ABC: abstract method generate(system_prompt, context_chunks, user_query) -> str; ProviderUnavailableError exception class)
+- [X] T020 Create services/api/src/main.py (FastAPI app factory with title="RAG API", version from env; lifespan context manager: init DB connection pool on startup, close on shutdown; include health router; OpenAPI at /docs)
+- [X] T021 [P] Create services/api/src/schemas/health.py (HealthResponse, ServiceChecks, ReadinessResponse Pydantic v2 models matching contracts/health.md)
+- [X] T022 Create services/api/src/routers/health.py (GET /api/v1/health: return HealthResponse{status:"healthy"}; GET /api/v1/ready: ping DB + Redis, return ReadinessResponse with check statuses, 503 if any critical check fails)
+- [X] T023 Write contract tests tests/contract/test_health.py (test GET /health returns 200 + HealthResponse schema; GET /ready returns 200/503 + ReadinessResponse schema; no auth required on either endpoint) — **FAIL before T022**
 - [ ] T024 Run `docker compose up --build` and verify GET /api/v1/health returns 200; GET /api/v1/ready returns 200 with all checks ok; T023 contract tests pass
 
 **Checkpoint**: Foundation ready — all user story phases may now begin in sequence.

@@ -1,8 +1,46 @@
+# Version control
 .git
+.gitignore
+
+# Python
 .venv
-.pytest_cache
-.ruff_cache
+venv
 __pycache__
 *.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info
+dist/
+build/
+*.egg
+
+# Test / lint cache
+.pytest_cache
+.ruff_cache
+.mypy_cache
+htmlcov/
+.coverage
+coverage.xml
+
+# Secrets / env
 .env
 infra/docker/.env
+**/.env.local
+
+# Docs / specs (not needed in image)
+docs/
+specs/
+.specify/
+.claude/
+
+# IDE
+.vscode/
+.idea/
+
+# OS artefacts
+.DS_Store
+Thumbs.db
+
+# FAISS data (mounted as a volume at runtime)
+data/
