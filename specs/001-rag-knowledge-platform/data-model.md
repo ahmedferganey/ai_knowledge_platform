@@ -8,7 +8,7 @@
 
 ## Overview
 
-Five primary entities persisted in PostgreSQL 15. One derived store (FAISS per-user index on
+Six primary entities persisted in PostgreSQL 15. One derived store (FAISS per-user index on
 persistent volume). One ephemeral store (Redis response cache).
 
 ```
@@ -16,6 +16,7 @@ User (1) ──── (N) Document (1) ──── (N) Chunk
               │
               └── (1) IngestionJob
 User (1) ──── (N) QueryLog
+User (1) ──── (N) QueryJob          ← async query tracking (FR-015)
 ```
 
 ---
@@ -74,7 +75,11 @@ pending → processing → completed
 - `pending`: document accepted, ingestion job queued
 - `processing`: Celery worker has claimed the job
 - `completed`: all chunks extracted, embedded, and indexed
-- `failed`: unrecoverable error; no partial content indexed
+- `failed`: unrecoverable error (corrupted file, parse failure, chunk ceiling exceeded); no partial content indexed
+
+**Chunk ceiling**: If processing would yield more than `MAX_CHUNKS_PER_DOCUMENT` chunks
+(default 1 000, operator-configurable), the job transitions to `failed` with a descriptive
+error. No partial content is indexed.
 
 ---
 
@@ -125,6 +130,38 @@ re-ingestion in future (e.g., embedding model upgrade).
 | `completed_at` | TIMESTAMPTZ | NULLABLE | Set on `completed` or `failed` |
 
 **Indexes**: `owner_id` (list jobs per user), `celery_task_id` (worker correlation).
+
+---
+
+## Entity: QueryJob
+
+Tracks the lifecycle of an asynchronous query request (FR-015). Only populated when the
+synchronous query path is bypassed due to projected tail latency. Synchronous queries that
+return within timeout are not persisted here — they are recorded only in `QueryLog`.
+
+| Field | Type | Constraints | Notes |
+|-------|------|-------------|-------|
+| `id` | UUID | PK, NOT NULL | Returned as `query_job_id` in 202 response |
+| `user_id` | UUID | FK → users.id, NOT NULL | |
+| `tenant_id` | UUID | NULLABLE | Reserved for future multi-tenancy |
+| `query_hash` | CHAR(64) | NOT NULL | SHA-256 of normalised query text; used for cache lookup on completion |
+| `status` | VARCHAR(20) | NOT NULL, DEFAULT `pending` | See state machine below |
+| `result_json` | TEXT | NULLABLE | Serialised `QueryResponse` JSON; set on `completed` |
+| `error_message` | TEXT | NULLABLE | Set on `failed` |
+| `created_at` | TIMESTAMPTZ | NOT NULL, DEFAULT NOW() | |
+| `updated_at` | TIMESTAMPTZ | NOT NULL, DEFAULT NOW() | |
+| `completed_at` | TIMESTAMPTZ | NULLABLE | Set on `completed` or `failed` |
+
+**Indexes**: `user_id` + `created_at`, `query_hash`.
+
+**State machine**:
+```
+pending → processing → completed
+                    ↘ failed
+```
+
+**Retention**: Records older than `QUERY_JOB_RETENTION_DAYS` (default 7) may be pruned.
+`completed` jobs with cached results are effectively superseded by the Redis cache entry.
 
 ---
 

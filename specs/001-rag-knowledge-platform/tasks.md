@@ -6,6 +6,7 @@ description: "Task list for AI Knowledge Assistant Platform (RAG System)"
 
 **Input**: Design documents from `specs/001-rag-knowledge-platform/`
 **Prerequisites**: plan.md ✅ · spec.md ✅ · research.md ✅ · data-model.md ✅ · contracts/ ✅
+**Last updated**: 2026-04-17 — Added T006A, T008A, T015A, T016A, T043A, T051A, T055A–T055C for async query path (QueryJob entity + polling endpoint + Celery task), JWKS 10-min TTL + fail-closed, MAX_CHUNKS_PER_DOCUMENT ceiling, admin role RBAC. Updated T038, T065, T067.
 
 **Tests**: Included — constitution mandates TDD (Red → Green → Refactor). Tests are written
 and confirmed failing before each implementation task.
@@ -45,6 +46,7 @@ tests/load/              Locust load scenarios
 - [X] T004 [P] Initialize services/worker/ package in services/worker/pyproject.toml (Celery[redis], pdfplumber, python-docx; depends on shared/)
 - [X] T005 [P] Create infra/docker/docker-compose.yml (services: api, worker, postgres:15-alpine, redis:7-alpine, jaeger:latest, mock-idp; health checks, named volumes, .env file reference)
 - [X] T006 [P] Create infra/docker/.env.example (all env vars: DATABASE_URL, REDIS_URL, CELERY_BROKER_URL, FAISS_DATA_PATH, LLM_PROVIDER, OPENAI_API_KEY, ANTHROPIC_API_KEY, AUTH_JWKS_URL, AUTH_TOKEN_ISSUER, CHUNK_SIZE, CHUNK_OVERLAP, CACHE_TTL_SECONDS, QUERY_RATE_LIMIT_PER_MINUTE, UPLOAD_RATE_LIMIT_PER_MINUTE, MAX_FILE_SIZE_BYTES, LOG_LEVEL, OTEL_EXPORTER_OTLP_ENDPOINT)
+- [ ] T006A [P] Update infra/docker/.env.example to add new operator-configurable vars: AUTH_JWKS_CACHE_TTL_SECONDS=600, MAX_CHUNKS_PER_DOCUMENT=1000, QUERY_SYNC_TIMEOUT_SECONDS=4, QUERY_JOB_RETENTION_DAYS=7
 - [X] T007 [P] Create .github/workflows/ci.yml skeleton (jobs: lint with ruff, type-check with mypy --strict, unit-test with pytest tests/unit/, build docker images for api and worker)
 
 **Checkpoint**: All packages install cleanly; `docker compose config` validates without errors.
@@ -59,6 +61,7 @@ All user story work depends on this phase being complete.
 **⚠️ CRITICAL**: No user story implementation begins until this phase is complete.
 
 - [X] T008 Create shared/src/config/settings.py (Pydantic BaseSettings: all env vars from T006 with types, defaults, and validators; export Settings singleton via `get_settings()`)
+- [ ] T008A Update shared/src/config/settings.py to add: auth_jwks_cache_ttl_seconds: int = 600, max_chunks_per_document: int = 1000, query_sync_timeout_seconds: int = 4, query_job_retention_days: int = 7 (with env var aliases AUTH_JWKS_CACHE_TTL_SECONDS etc.)
 - [X] T009 [P] Create shared/src/db/session.py (create_async_engine from DATABASE_URL, AsyncSessionLocal factory, get_db() async generator dependency)
 - [X] T010 [P] Configure Alembic in shared/src/db/ (alembic.ini targeting DATABASE_URL, env.py with async engine, versions/ directory; run `alembic init` equivalent)
 - [X] T011 Create shared/src/models/user.py (User SQLAlchemy 2 mapped class: id UUID PK, external_id UNIQUE, email, role, query_rate_limit_per_minute, storage_quota_bytes, used_storage_bytes, tenant_id, created_at, updated_at; index on external_id)
@@ -66,7 +69,9 @@ All user story work depends on this phase being complete.
 - [X] T013 [P] Create shared/src/models/chunk.py (Chunk model: id, document_id FK, owner_id FK, tenant_id, chunk_index, page_number nullable, row_range nullable, text_content, token_count, created_at; indexes on document_id, owner_id)
 - [X] T014 [P] Create shared/src/models/ingestion_job.py (IngestionJob model: id, document_id FK, owner_id FK, status, error_message, celery_task_id, created_at, updated_at, completed_at; indexes on owner_id, celery_task_id)
 - [X] T015 [P] Create shared/src/models/query_log.py (QueryLog model: id, user_id FK, tenant_id, query_hash, response_latency_ms, cache_hit, degraded, top_k_requested, chunks_retrieved, created_at; index on user_id + created_at)
+- [ ] T015A [P] Create shared/src/models/query_job.py (QueryJob SQLAlchemy 2 model: id UUID PK, user_id FK→users CASCADE, tenant_id nullable, query_hash CHAR(64) NOT NULL, status VARCHAR(20) NOT NULL default 'pending', result_json TEXT nullable, error_message TEXT nullable, created_at, updated_at, completed_at nullable; indexes on user_id+created_at and query_hash; state machine: pending→processing→completed|failed)
 - [X] T016 Create Alembic initial migration in shared/alembic/versions/0001_initial_schema.py (creates all 5 tables from T011–T015; reversible downgrade)
+- [ ] T016A Create Alembic migration shared/alembic/versions/0002_add_query_jobs.py (adds query_jobs table per T015A schema; reversible downgrade drops table)
 - [X] T017 Create shared/src/providers/vector_store.py (VectorStoreProvider ABC: abstract methods add_chunks(chunks, embeddings, owner_id), search(query_vector, k, owner_id) -> list[ChunkResult], delete_by_document(document_id, owner_id); ChunkResult dataclass: chunk_id, score)
 - [X] T018 [P] Create shared/src/providers/embedding.py (EmbeddingProvider ABC: abstract methods embed_texts(texts: list[str]) -> list[list[float]], embed_query(text: str) -> list[float])
 - [X] T019 [P] Create shared/src/providers/llm.py (LLMProvider ABC: abstract method generate(system_prompt, context_chunks, user_query) -> str; ProviderUnavailableError exception class)
@@ -107,7 +112,7 @@ All user story work depends on this phase being complete.
 - [ ] T035 [US2] Create services/api/src/dependencies.py (get_db using shared/src/db/session.py; get_celery() returns Celery app instance; get_current_user() STUB returning hardcoded User(id=uuid4(), external_id="stub", role="contributor") for US2 testing — replaced in US4)
 - [ ] T036 [US2] Create services/api/src/routers/ingest.py — POST /api/v1/ingest (validate content_type against allowlist; check size ≤ MAX_FILE_SIZE_BYTES; compute SHA-256 content hash; check UniqueConstraint(owner_id, content_hash) → 409 with existing_document_id; check used_storage_bytes + size ≤ quota → 507; insert Document(status=pending); insert IngestionJob; dispatch ingest_document.delay(job_id); return 202 IngestResponse)
 - [ ] T037 [US2] Create services/api/src/routers/ingest.py — GET /api/v1/ingest/{job_id} (fetch IngestionJob by id; verify job.owner_id == current_user.id → 403; return JobStatusResponse; 404 if not found)
-- [ ] T038 [US2] Create services/worker/src/tasks/ingestion.py — ingest_document Celery task (fetch Document + IngestionJob; update status→processing; call parser; call chunker; batch-insert Chunk records via DB; update Document status→completed; set IngestionJob.completed_at; on any exception: status→failed + error_message; retry on transient errors max 3 times) — passes T028
+- [ ] T038 [US2] Create services/worker/src/tasks/ingestion.py — ingest_document Celery task (fetch Document + IngestionJob; update status→processing; call parser; call chunker; **after chunking check len(chunks) ≤ MAX_CHUNKS_PER_DOCUMENT — if exceeded set status→failed with "Document exceeds maximum chunk count ({limit})" error, abort without indexing any chunks**; batch-insert Chunk records via DB; update Document status→completed; set IngestionJob.completed_at; on any exception: status→failed + error_message; retry on transient errors max 3 times) — passes T028
 - [ ] T039 [US2] Register ingest router in services/api/src/main.py (app.include_router with prefix /api/v1; wire get_db and get_current_user dependencies)
 - [ ] T040 [US2] Wire parser + chunker + DB persistence in services/worker/src/tasks/ingestion.py; run T025 contract tests and confirm they pass
 - [ ] T041 [US2] Write integration test tests/integration/test_ingestion.py (upload sample.pdf fixture via HTTP POST; poll job status until completed; query DB for Chunk rows with document_id; assert chunk count > 0 and text_content non-empty) — **FAIL before T042**
@@ -126,6 +131,7 @@ All user story work depends on this phase being complete.
 ### Contract Tests for US1 ⚠️ Write First, Must FAIL
 
 - [ ] T043 [P] [US1] Write contract tests tests/contract/test_query.py (POST /query returns 200 + QueryResponse schema; answer is string or null; degraded is boolean; sources is array; cache_hit is boolean; latency_ms is integer; 401 on no auth; 422 on invalid body; 429 schema with retry_after_seconds) — **FAIL before T057**
+- [ ] T043A [P] [US1] Write contract tests tests/contract/test_query_async.py (POST /query can return 202 + AsyncQueryResponse{query_job_id, status, message}; GET /query/{query_job_id} returns QueryJobResponse with status pending|processing|completed|failed; status=completed contains nested result matching QueryResponse schema; status=failed contains error_message; 403 on job_id owned by different user; 404 on unknown job_id) — **FAIL before T055A**
 
 ### Unit Tests ⚠️ Write First, Must FAIL
 
@@ -140,11 +146,15 @@ All user story work depends on this phase being complete.
 - [ ] T049 [US1] Update services/worker/src/processors/indexer.py to inject EmbeddingProvider + VectorStoreProvider (batch embed ChunkData texts; call vector_store.add_chunks(chunks, embeddings, owner_id); update Chunk.token_count from ChunkData.token_count)
 - [ ] T050 [US1] Update services/worker/src/tasks/ingestion.py to call indexer with embedding + vector store after DB chunk save (dependency inject FAISSVectorStore + SentenceTransformerEmbedding from config-driven factory)
 - [ ] T051 [P] [US1] Create services/api/src/schemas/query.py (QueryRequest: query str 1–2000 chars, top_k int 1–20 default 5; SourceReference: document_id, document_name, chunk_index, page_number nullable, text; QueryResponse: query_id, answer nullable, degraded bool, cache_hit bool, sources list[SourceReference], latency_ms)
+- [ ] T051A [P] [US1] Extend services/api/src/schemas/query.py with async query schemas: AsyncQueryResponse(query_job_id UUID, status str, message str); QueryJobResponse(query_job_id UUID, status str, created_at datetime, completed_at datetime|None, result QueryResponse|None, error str|None) — matches contracts/query-status.md
 - [ ] T052 [US1] Create shared/src/impl/openai_llm.py (OpenAILLMProvider implements LLMProvider: async generate() using openai.AsyncOpenAI, model="gpt-4o", system prompt instructs grounding-only answers, context = chunk texts joined with separators, max_context_tokens=6000; catches APIConnectionError/RateLimitError/Timeout → raises ProviderUnavailableError) — passes T046
 - [ ] T053 [P] [US1] Create shared/src/impl/claude_llm.py (ClaudeLLMProvider implements LLMProvider: async generate() using anthropic.AsyncAnthropic, model="claude-sonnet-4-6", same prompt structure as OpenAI impl; catches anthropic.APIConnectionError → raises ProviderUnavailableError) — passes T046
 - [ ] T054 [US1] Create provider factory in shared/src/providers/factory.py (get_embedding_provider() → SentenceTransformerEmbedding; get_vector_store_provider() → FAISSVectorStore; get_llm_provider() → OpenAILLMProvider or ClaudeLLMProvider based on LLM_PROVIDER env var)
-- [ ] T055 [US1] Create services/api/src/routers/query.py (POST /api/v1/query: validate QueryRequest; embed query via EmbeddingProvider; call VectorStoreProvider.search(owner_id=current_user.id, k=top_k); if no results return QueryResponse(answer=None, sources=[]); call LLMProvider.generate(); on ProviderUnavailableError return QueryResponse(degraded=True, sources=raw_chunks); insert QueryLog record; return QueryResponse with latency_ms)
-- [ ] T056 [US1] Register query router in services/api/src/main.py (include_router with prefix /api/v1; wire providers via dependency injection from factory)
+- [ ] T055 [US1] Create services/api/src/routers/query.py — synchronous POST /api/v1/query path (validate QueryRequest; embed query via EmbeddingProvider; call VectorStoreProvider.search(owner_id=current_user.id, k=top_k); if no results return QueryResponse(answer=None, sources=[]); call LLMProvider.generate(); on ProviderUnavailableError return QueryResponse(degraded=True, sources=raw_chunks); insert QueryLog record; return QueryResponse with latency_ms)
+- [ ] T055A [US1] Add async dispatch path to services/api/src/routers/query.py POST /api/v1/query (if elapsed embed+search time projected to exceed QUERY_SYNC_TIMEOUT_SECONDS: create QueryJob(status=pending, query_hash=hash); dispatch async_query Celery task with job_id; return 202 AsyncQueryResponse; callers can detect async via 202 status code) — passes T043A
+- [ ] T055B [US1] Create GET /api/v1/query/{query_job_id} endpoint in services/api/src/routers/query.py (fetch QueryJob from DB by id; verify job.user_id == current_user.id → 403; 404 if not found; deserialize result_json to QueryResponse if status=completed; return QueryJobResponse) — passes T043A
+- [ ] T055C [US1] Create Celery task services/worker/src/tasks/query_task.py (async_query(job_id) task: fetch QueryJob; update status→processing; execute full embed→VectorStoreProvider.search→LLMProvider.generate pipeline (same logic as sync path); serialize result as QueryResponse JSON; set status→completed + result_json + completed_at; on any exception set status→failed + error_message; no retry — callers poll for result)
+- [ ] T056 [US1] Register query router in services/api/src/main.py (include_router with prefix /api/v1; wire providers via dependency injection from factory; both POST /query and GET /query/{query_job_id} registered)
 - [ ] T057 [US1] Write integration test tests/integration/test_query.py (seed test user's FAISS index with known chunk text; call POST /api/v1/query with matching question; assert response.answer is not None; assert response.degraded is False; assert len(response.sources) > 0; assert response.cache_hit is False; assert response.latency_ms > 0) — **FAIL before T058**
 - [ ] T058 [US1] Verify T057 + T043 tests pass with full query pipeline running; run full ingestion → query round-trip test
 
@@ -176,7 +186,7 @@ All user story work depends on this phase being complete.
 
 **Goal**: JWT validation from external IdP; per-user document isolation enforced; Redis response cache; per-user rate limiting with 429 + Retry-After.
 
-**Independent Test**: User A uploads doc; User B queries → User B cannot see User A's content (empty sources); expired JWT returns 401; reader role calling ingest returns 403; rate limit exceeded returns 429 with Retry-After header; same query from same user returns cache_hit: true on second call.
+**Independent Test**: User A uploads doc; User B queries → User B cannot see User A's content (empty sources); expired JWT returns 401; reader role calling ingest returns 403; admin role passes contributor checks; rate limit exceeded returns 429 with Retry-After header; same query from same user returns cache_hit: true on second call; JWKS endpoint mocked unavailable after cache TTL → authenticated requests return 503.
 
 ### Contract + Unit Tests ⚠️ Write First, Must FAIL
 
@@ -185,9 +195,9 @@ All user story work depends on this phase being complete.
 
 ### Implementation for User Story 4
 
-- [ ] T065 [US4] Create services/api/src/middleware/auth.py (fetch JWKS from AUTH_JWKS_URL using httpx; cache JWKS keys in memory with 1-hour TTL; validate RS256 JWT: signature, exp, iss==AUTH_TOKEN_ISSUER; extract sub, email, role claims; lazy-create or update User in DB by external_id; inject UserContext(user_id, role, external_id) into request.state; return 401 on any validation failure with WWW-Authenticate header)
+- [ ] T065 [US4] Create services/api/src/middleware/auth.py (fetch JWKS from AUTH_JWKS_URL using httpx; cache JWKS keys in-process with AUTH_JWKS_CACHE_TTL_SECONDS TTL (default 600 s / 10 min); if JWKS unreachable and cache not expired → serve from cache; if cache has expired and JWKS unreachable → return 503 on all authenticated endpoints until keys refresh; cold start with no cached keys and unreachable IdP → raise RuntimeError to block startup; validate RS256 JWT: signature, exp, iss==AUTH_TOKEN_ISSUER; extract sub, email, role claims (role ∈ {reader, contributor, admin}); lazy-create or update User in DB by external_id; inject UserContext(user_id, role, external_id) into request.state; return 401 on any JWT validation failure with WWW-Authenticate header)
 - [ ] T066 [US4] Create services/api/src/middleware/rate_limit.py (instantiate slowapi Limiter with Redis storage_uri from REDIS_URL; define limits: POST /query = QUERY_RATE_LIMIT_PER_MINUTE/minute keyed by user_id claim; POST /ingest = UPLOAD_RATE_LIMIT_PER_MINUTE/minute keyed by user_id; add X-RateLimit-Limit, X-RateLimit-Remaining, X-RateLimit-Reset headers on all responses; 429 response includes retry_after_seconds)
-- [ ] T067 [US4] Replace get_current_user STUB in services/api/src/dependencies.py with real implementation (extract UserContext from request.state set by auth middleware; raise 401 if not present; raise 403 if role check fails for protected operations)
+- [ ] T067 [US4] Replace get_current_user STUB in services/api/src/dependencies.py with real implementation (extract UserContext from request.state set by auth middleware; raise 401 if not present; role hierarchy: admin > contributor > reader; admin passes all contributor checks; raise 403 if role check fails for protected operations: reader→query only, contributor+admin→query+ingest, admin only→future management endpoints)
 - [ ] T068 [US4] Wire auth middleware and rate limit middleware into services/api/src/main.py (middleware stack order: tracing → auth → rate_limit; exclude /api/v1/health and /api/v1/ready from auth middleware; exclude /api/v1/health, /api/v1/ready, /metrics from rate limiting)
 - [ ] T069 [US4] Verify T063 contract tests pass (401 on no/invalid token; 403 on wrong role; 429 with correct headers)
 - [ ] T070 [US4] Create shared/src/cache/redis_cache.py (ResponseCache: get(user_id, query_text) → QueryResponse | None; set(user_id, query_text, response, ttl); cache_key = sha256(f"{user_id}:{query_text.lower().strip()}"); serialize/deserialize QueryResponse as JSON; connect to REDIS_URL) — passes T064
@@ -269,12 +279,18 @@ All user story work depends on this phase being complete.
 ### Parallel Opportunities
 
 - T002, T003, T004, T005, T006, T007 all run in parallel (Phase 1)
-- T011–T015 (all 5 models) run in parallel (Phase 2)
+- T006A, T008A run in parallel (new config additions)
+- T011–T015, T015A (all 6 models) run in parallel (Phase 2)
+- T016A runs after T015A (needs QueryJob model registered)
 - T017, T018, T019 (provider ABCs) run in parallel (Phase 2)
 - T026, T027, T028 (US2 unit tests) run in parallel
 - T030, T031, T034 (US2 infra) run in parallel
+- T043, T043A (query contract tests) run in parallel
 - T044, T045, T046 (US1 unit tests) run in parallel
+- T051, T051A (query schemas) run in parallel
 - T052, T053 (OpenAI + Claude LLM implementations) run in parallel
+- T055A, T055B run after T055 (extend same router file)
+- T055C runs in parallel with T055 (different file: worker task)
 - T085–T092 (all K8s + Docker artifacts) run in parallel (Phase 8)
 
 ---

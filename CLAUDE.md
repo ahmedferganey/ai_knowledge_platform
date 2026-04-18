@@ -3,6 +3,8 @@
 Auto-generated from all feature plans. Last updated: 2026-04-17
 
 ## Active Technologies
+- Python 3.11+ + FastAPI 0.111+, Pydantic v2, SQLAlchemy 2 (async) + asyncpg, (001-rag-knowledge-platform)
+- PostgreSQL 15 (metadata), Redis 7 (cache + Celery broker), FAISS on PV (vectors) (001-rag-knowledge-platform)
 
 - Python 3.11+ + FastAPI 0.111+, Pydantic v2, SQLAlchemy 2 (async), asyncpg, (001-rag-knowledge-platform)
 
@@ -51,6 +53,7 @@ locust -f tests/load/locustfile.py --host http://localhost:8000 --headless -u 50
 - structlog for all logging — never use `print()` or stdlib `logging` directly
 
 ## Recent Changes
+- 001-rag-knowledge-platform: Added Python 3.11+ + FastAPI 0.111+, Pydantic v2, SQLAlchemy 2 (async) + asyncpg,
 
 - 001-rag-knowledge-platform: Added Python 3.11+ + FastAPI 0.111+, Pydantic v2, SQLAlchemy 2 (async), asyncpg,
 

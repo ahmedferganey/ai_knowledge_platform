@@ -1,9 +1,14 @@
 # API Contract: Submit Query
 
 **Endpoint**: `POST /api/v1/query`
-**Auth**: Bearer token required (role: `reader` or `contributor`)
+**Auth**: Bearer token required (role: `reader`, `contributor`, or `admin`)
 **Rate limit**: Configured per role via env var (default 20 req/min)
 **Content-Type**: `application/json`
+
+> **Two response paths**: If the system determines the LLM response will exceed
+> `QUERY_SYNC_TIMEOUT_SECONDS`, it returns **202 Accepted** with a `query_job_id` for polling
+> (see [query-status.md](query-status.md)). Otherwise it returns **200 OK** with the full
+> result inline. Callers MUST handle both status codes.
 
 ---
 
@@ -57,6 +62,27 @@
 | `sources[].page_number` | integer | Yes | Null for CSV documents |
 | `sources[].text` | string | No | Verbatim retrieved segment text |
 | `latency_ms` | integer | No | End-to-end response time in milliseconds |
+
+---
+
+## Response: 202 Accepted — Async query enqueued (tail-latency path)
+
+Returned when LLM processing is projected to exceed `QUERY_SYNC_TIMEOUT_SECONDS`. The caller
+MUST poll `GET /api/v1/query/{query_job_id}` for the result.
+
+```json
+{
+  "query_job_id": "9f1c2d3e-1234-5678-abcd-ef0123456789",
+  "status": "pending",
+  "message": "Query accepted for async processing. Poll /api/v1/query/{query_job_id} for result."
+}
+```
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `query_job_id` | UUID string | Use to poll `GET /api/v1/query/{query_job_id}` |
+| `status` | string | Always `pending` at acceptance time |
+| `message` | string | Human-readable polling guidance |
 
 ---
 

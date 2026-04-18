@@ -116,7 +116,11 @@ context. If the answer cannot be determined from the context, say so explicitly.
 
 **Decision**: `python-jose[cryptography]` for JWT validation. JWKS endpoint URL configured
 via `AUTH_JWKS_URL` env var. Token claims: `sub` (user external ID), `email`, `role` (custom
-claim), `exp`, `iss`. JWKS keys cached in memory with 1-hour refresh TTL.
+claim), `exp`, `iss`. JWKS keys cached in memory with a **10-minute TTL** (operator-configurable
+via `AUTH_JWKS_CACHE_TTL_SECONDS`). If the IdP JWKS endpoint is unreachable, the system
+continues validating tokens from the cached key set until the cache expires; after expiry, all
+authenticated endpoints return 503 until keys are refreshed. Cold start with no cached keys
+and an unreachable IdP is a hard startup failure.
 
 **Rationale**: `python-jose` is the standard Python JWT library supporting RS256 and ES256.
 Fetching public keys from the IdP's JWKS endpoint (rather than storing them in config) means
@@ -198,6 +202,89 @@ Kubernetes manifests reference the SHA tag (immutable), not `latest` (mutable).
 
 ---
 
+## Decision 11: Async Query Path
+
+**Decision**: POST /query returns 202 + `query_job_id` for long-running queries; result
+polled via GET /query/{query_job_id}. This mirrors the ingestion job-status pattern already
+established in the design. The synchronous path (200 immediate response) remains the default;
+the async path activates only when LLM processing is projected to exceed the configured
+`QUERY_SYNC_TIMEOUT_SECONDS` threshold. A new `QueryJob` entity tracks async query state.
+
+**Rationale**: Reusing the polling pattern keeps the API surface consistent and avoids the
+complexity of persistent WebSocket connections or Server-Sent Events for v1. The Celery
+infrastructure needed for async dispatch is already in place for ingestion.
+
+**Alternatives considered**:
+- **Streaming (SSE)**: Higher UX quality for progressive token delivery but requires persistent
+  connection management and more complex client support. Suitable future enhancement.
+- **Synchronous-only**: Simpler but blocks on slow LLM responses, violating the <5s p95 SLA
+  for all network conditions. Async path is a safety valve for tail latency.
+
+---
+
+## Decision 12: Query Content Privacy (PII in Logs)
+
+**Decision**: Query text is never written to any log sink, metric label, or trace attribute.
+Only the SHA-256 hash of the normalised query (`lowercase(strip(query_text))`) is recorded —
+the same hash used for Redis cache key construction. This applies to structured logs,
+Prometheus label values, and OpenTelemetry span attributes.
+
+**Rationale**: Organizational knowledge base queries may contain confidential business
+information, employee names, product plans, or legally sensitive content. Logging plaintext
+queries creates data residency and compliance risk without meaningful operational benefit —
+the hash is sufficient for cache analysis, deduplication, and latency attribution.
+
+**Alternatives considered**:
+- **Truncated prefix (first 50 chars)**: Partial protection but inconsistent — sensitive terms
+  in the first 50 chars are still exposed. Rejected.
+- **Full plaintext**: Maximum debuggability but unacceptable compliance risk for enterprise use.
+
+---
+
+## Decision 13: Document Chunk Ceiling
+
+**Decision**: Hard ceiling on extracted chunks per document, default 1 000, configurable via
+`MAX_CHUNKS_PER_DOCUMENT` env var. If the ingestion worker determines that a document would
+produce more chunks than the ceiling, the job is set to `failed` with a descriptive error
+message. No partial content is indexed.
+
+**Rationale**: A 500-page PDF within the 10 MB file size limit can produce thousands of
+512-token chunks, causing FAISS index size to balloon and degrading retrieval latency for
+that user. Failing fast with a clear error is safer than silent truncation (which would yield
+misleading answers from incomplete knowledge) or indefinite processing (which could consume
+worker resources without bound).
+
+**Alternatives considered**:
+- **Silent truncation**: Index first N chunks, discard rest, mark completed. Rejected — users
+  would receive answers that miss content from later in the document without any indication.
+- **Auto-split into multiple jobs**: Adds coordination complexity for v1. Better future story.
+- **No ceiling (rely on file size only)**: A 9 MB PDF with tiny fonts can have 10k+ chunks.
+  File size alone is insufficient to bound processing time and index size.
+
+---
+
+## Decision 14: Admin Role Scope
+
+**Decision**: Three roles defined from v1: `reader` (query only), `contributor` (query +
+ingest), `admin` (all contributor actions; management API access reserved for v2). The `admin`
+role is stored in the User record from day one, sourced from the IdP token `role` claim.
+Dedicated admin management endpoints (user listing, quota adjustment, role changes) are out
+of scope for v1 and deferred to v2. In v1, quota and role management is handled via IdP
+claim configuration or direct operator tooling.
+
+**Rationale**: Defining the role in the data model and RBAC enforcement now costs one enum
+value and prevents a future schema migration. Deferring the management UI/API avoids scope
+creep without compromising the long-term architecture. The `admin` check in auth middleware
+is additive — it simply allows all contributor operations and future admin-gated routes.
+
+**Alternatives considered**:
+- **Two roles only (reader + contributor) in v1**: Simpler short-term but guaranteed schema
+  migration when admin management is added. Rejected — the cost of adding the field now is
+  near zero.
+- **Full admin API in v1**: Increases scope of US4 significantly. Deferred to v2.
+
+---
+
 ## Resolved NEEDS CLARIFICATION Items
 
 All `NEEDS CLARIFICATION` items from the plan template have been resolved:
@@ -212,3 +299,8 @@ All `NEEDS CLARIFICATION` items from the plan template have been resolved:
 | Performance Goals | <5s p95 uncached, <2s p95 cached, 100 concurrent |
 | Constraints | External IdP, per-user FAISS, provider interfaces |
 | Scale/Scope | 100 concurrent users, docs ≤10 MB |
+| Async query path | Polling job ID (mirrors ingestion); sync default, async on tail latency |
+| PII in query logs | Query hash only (SHA-256); plaintext never logged |
+| IdP outage handling | JWKS cached 10 min TTL; fail closed on cache expiry |
+| Large document ceiling | 1 000 chunks max per doc (configurable); fail job on exceed |
+| Admin role | Defined in v1 data model + RBAC; management API deferred to v2 |

@@ -14,6 +14,11 @@
 - Q: What is the authentication issuance model? → A: External IdP — platform validates bearer tokens from a configured OIDC/OAuth2 provider; no login, registration, or credential management endpoints on this platform.
 - Q: What does "degraded mode" mean when the LLM provider is unavailable? → A: Return retrieved segments only with `degraded: true` flag; no synthesized answer, no 5xx error. Cache unavailability also falls back gracefully to live retrieval.
 - Q: What is the vector store strategy for v1? → A: Pluggable provider abstraction from day 1; FAISS is the default implementation with index serialized to a persistent volume; switching stores requires only config + new provider impl.
+- Q: What does "asynchronous query submission" mean in practice (FR-015)? → A: Polling job ID pattern — POST /query returns 202 + query_job_id immediately; GET /query/{query_job_id} returns the result when ready. Mirrors the ingestion job status pattern. All synchronous queries (responses under the latency threshold) return 200 directly; async path activates only when LLM processing is projected to exceed the synchronous timeout.
+- Q: Is query text logged in structured log events (FR-023)? → A: Query hash only (SHA-256) — query plaintext is never written to logs or stored in any observability system. Only the hash is logged, consistent with the user ID hashing approach. This applies to all log sinks: structured logs, metrics labels, and trace attributes.
+- Q: What is the behavior when the IdP JWKS endpoint is unreachable at token validation time? → A: Cache JWKS keys with a 5–15 minute TTL; continue validating from cache during IdP outage; fail closed (reject requests with 503) only when the cache has expired and cannot be refreshed. Cache miss on first startup (no cached keys yet) is a hard failure.
+- Q: What happens when a valid document yields an excessive number of chunks (e.g., 500+ page PDF within the 10 MB limit)? → A: Hard ceiling on extracted chunk count — operator-configurable (default 1 000 chunks); if processing would exceed the ceiling the ingestion job MUST fail with a descriptive error and no partial content is indexed. No silent truncation.
+- Q: Is there an admin role for user and quota management? → A: `admin` role defined in v1 data model and RBAC enforcement (granted via IdP claim); dedicated management API endpoints deferred to v2. An `admin` user can perform all `contributor` actions; quota/role management in v1 is handled out-of-band via IdP claims or direct operator tooling.
 
 ---
 
@@ -169,18 +174,20 @@ a monitoring dashboard fed by the platform's metrics endpoint.
 
 3. **Given** a request that exceeds the configured response time threshold, **When** it completes,
    **Then** the event is recorded in the structured log with sufficient context (user ID hash,
-   query length, response time) to diagnose the cause without exposing query content.
+   query hash, query length, response time) to diagnose the cause — query plaintext is never
+   logged.
 
 ---
 
 ### Edge Cases
 
-- What happens when a document is very large (500+ pages) and exceeds processing time limits?
+- Documents that would yield more than the configured chunk ceiling (default 1 000) have their ingestion job set to `failed` with a descriptive error; no partial content is indexed. Operators can raise the ceiling via configuration.
 - When the LLM provider is unavailable: return retrieved segments with `degraded: true`; no synthesized answer, no 5xx error.
 - What is the behavior when no document segments are semantically relevant to a query (empty retrieval set)?
 - How are concurrent uploads of the same document by the same user handled?
+- When the IdP JWKS endpoint is unreachable: serve token validation from a cached JWKS response (TTL 10 min by default); fail closed with 503 only after cache expiry. Cold start without any cached keys and an unreachable IdP is a hard failure.
 - What happens when the cache store becomes unavailable — does query service continue (degraded) or fail?
-- How does the system handle queries containing sensitive personal information (PII) in the input?
+- Queries may contain sensitive PII: only the SHA-256 hash of the query is stored or logged; plaintext is never persisted outside the in-flight request processing context.
 - What is the behavior when the vector store is under heavy write load during a query?
 - How does the system handle malformed or oversized query payloads?
 
@@ -203,7 +210,10 @@ a monitoring dashboard fed by the platform's metrics endpoint.
 - **FR-005**: System MUST reject uploads of unsupported file types with a descriptive error and
   MUST NOT store rejected files.
 - **FR-006**: System MUST enforce per-user file size and total storage quotas. Requests exceeding
-  quotas MUST be rejected with a quota-exceeded error before storage occurs.
+  quotas MUST be rejected with a quota-exceeded error before storage occurs. System MUST also
+  enforce an operator-configurable maximum extracted chunk count per document (default: 1 000
+  chunks). If processing a document would exceed this ceiling, the ingestion job MUST be set to
+  `failed` with a descriptive error — no partial content is indexed.
 - **FR-007**: System MUST detect duplicate document submissions by comparing content hash against
   existing documents owned by the same user. A duplicate MUST be rejected with a 409 Conflict
   response identifying the existing document. No reprocessing occurs.
@@ -223,8 +233,7 @@ a monitoring dashboard fed by the platform's metrics endpoint.
   answer — when no document segments meet the relevance threshold.
 - **FR-014**: System MUST serve cached responses for queries that match a recently cached result,
   with identical source references preserved in the cached response.
-- **FR-015**: System MUST support both synchronous query responses (immediate) and acknowledge
-  asynchronous query submission for long-running requests.
+- **FR-015**: System MUST support both synchronous query responses (immediate, HTTP 200) and asynchronous query submission via a polling job ID pattern (HTTP 202 + `query_job_id`; result retrievable via GET /query/{query_job_id}). The async path mirrors the ingestion job status pattern. Synchronous is the default; async activates only when LLM processing is projected to exceed the configured synchronous response timeout.
 - **FR-026**: When the LLM inference provider is unreachable or returns an unrecoverable error,
   the system MUST return a degraded response containing the top retrieved document segments and
   a `degraded: true` field, rather than a 5xx error. When the cache store is unavailable, the
@@ -241,9 +250,17 @@ a monitoring dashboard fed by the platform's metrics endpoint.
   (OIDC/OAuth2); it does not issue, register, or manage credentials itself.
 - **FR-017**: System MUST reject tokens that are expired, malformed, or signed with an
   unrecognized key. The accepted token issuer and signing key(s) MUST be operator-configured,
-  not hardcoded. No `/register` or `/login` endpoints exist on this platform.
-- **FR-018**: System MUST enforce role-based access: minimum roles are `reader` (query only) and
-  `contributor` (query + ingest).
+  not hardcoded. No `/register` or `/login` endpoints exist on this platform. The system MUST
+  cache the JWKS response from the IdP with a configurable TTL (default: 10 minutes) and
+  continue validating tokens from cache during a transient IdP outage. When the cache has
+  expired and the JWKS endpoint cannot be reached, the system MUST fail closed — all
+  authenticated endpoints return 503 until keys are refreshed. A cold start with no cached
+  keys and an unreachable JWKS endpoint is a hard startup failure.
+- **FR-018**: System MUST enforce role-based access with three defined roles: `reader` (query
+  only), `contributor` (query + ingest), and `admin` (all contributor actions; future management
+  API access). Roles are granted via IdP token claims. The `admin` role MUST be recognised and
+  stored in the User record from v1; dedicated admin management endpoints are out of scope for
+  v1 and deferred to v2.
 - **FR-019**: System MUST enforce per-user rate limits on query and ingestion endpoints; requests
   exceeding limits MUST receive a 429 response with a `Retry-After` indicator.
 - **FR-020**: System MUST validate all request payloads and reject malformed or oversized requests
@@ -259,6 +276,8 @@ a monitoring dashboard fed by the platform's metrics endpoint.
 - **FR-023**: System MUST emit structured log events for: query received, query completed,
   ingestion started, ingestion completed, ingestion failed, authentication failure, rate limit
   hit. Log events MUST include a correlation identifier, user identifier (hashed), and timestamp.
+  Query text MUST NOT appear in any log event, metric label, or trace attribute — only the
+  SHA-256 hash of the normalized query text is permitted in observability data.
 - **FR-024**: System MUST expose operational metrics including: request count, error count,
   response latency distribution, cache hit/miss count, and active job count.
 - **FR-025**: System MUST propagate a correlation identifier across all internal operations for
@@ -274,7 +293,9 @@ a monitoring dashboard fed by the platform's metrics endpoint.
   representation (internal), creation timestamp.
 
 - **Query**: A question submitted by a user. Attributes: unique identifier, submitting user
-  identity, query text, submission timestamp, response latency, cache hit indicator.
+  identity, query text, submission timestamp, response latency, cache hit indicator, async job
+  status (`pending` | `processing` | `completed` | `failed` — populated only for async path),
+  degraded flag.
 
 - **Answer**: The response to a query. Attributes: answer text, list of source references
   (each with document name, document ID, and segment text), generation timestamp, cache origin.
@@ -284,7 +305,8 @@ a monitoring dashboard fed by the platform's metrics endpoint.
   timestamp, error message (if failed).
 
 - **User**: An authenticated identity authorized to use the platform. Attributes: unique
-  identifier, role(s), rate limit quota, storage quota, tenant scope.
+  identifier, role (`reader` | `contributor` | `admin`), rate limit quota, storage quota,
+  tenant scope. Role is sourced from IdP token claims and stored locally for enforcement.
 
 ---
 
@@ -350,8 +372,9 @@ a monitoring dashboard fed by the platform's metrics endpoint.
   implementation. The FAISS index MUST be serialized to a persistent volume so the index
   survives pod restarts without full rebuilds. Migration to a managed vector DB is a
   configuration-level change, not a code change.
-- Rate limits, quota thresholds, and chunk sizes are operator-configured values, not
-  hardcoded — they may vary per deployment environment.
+- Rate limits, quota thresholds, chunk sizes, and the maximum chunk count per document are
+  operator-configured values, not hardcoded — they may vary per deployment environment.
+  The default maximum chunk count per document is 1 000.
 - The platform will be operated in a containerized environment; bare-metal or VM-only
   deployment is not a supported target.
 - Deletion of ingested documents (and their indexed content) is a required operation but
